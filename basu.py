@@ -1,100 +1,180 @@
-from picamera2 import Picamera2
-import cv2
+from flask import Flask, request, jsonify
 import face_recognition
 import numpy as np
-import time
+import pickle
+import cv2
+import os
+
+app = Flask(__name__)
+
+# ------------------ CONFIG ------------------
+DB_FILE = "aadhaar_sim_db.pkl"
+THRESHOLD = 0.5
+CONFIDENCE_LEARN_THRESHOLD = 60  # Only learn if confidence > 60%
+MAX_ENCODINGS_PER_USER = 20
 
 # ------------------ LOAD DATABASE ------------------
-known_encodings = []
-known_names = []
+def load_database():
+    if not os.path.exists(DB_FILE):
+        return []
+    with open(DB_FILE, "rb") as f:
+        return pickle.load(f)
 
-image = face_recognition.load_image_file("faces/shreyon.jpg")
-encoding = face_recognition.face_encodings(image)[0]
-known_encodings.append(encoding)
-known_names.append("Shreyon")
+database = load_database()
 
-# ------------------ CAMERA ------------------
-picam2 = Picamera2()
-config = picam2.create_preview_configuration(
-    main={"size": (640, 480), "format": "RGB888"}
-)
-picam2.configure(config)
-picam2.start()
-''
-''
-time.sleep(2)
+# ------------------ SAVE DATABASE ------------------
+def save_database():
+    with open(DB_FILE, "wb") as f:
+        pickle.dump(database, f)
 
-# ------------------ VARIABLES ------------------
-blink_count = 0
-head_positions = []
-authenticated = False
+# ------------------ MATCH FUNCTION ------------------
+def match_face(face_encoding):
+    best_match = None
+    min_distance = float("inf")
 
-def eye_aspect_ratio(eye):
-    # Simple blink detection logic
-    A = np.linalg.norm(eye[1] - eye[5])
-    B = np.linalg.norm(eye[2] - eye[4])
-    C = np.linalg.norm(eye[0] - eye[3])
-    return (A + B) / (2.0 * C)
+    for person in database:
+        enc_list = person.get("encodings", [person.get("encoding")])
 
-# ------------------ MAIN LOOP ------------------
-while True:
-    frame = picam2.capture_array()
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        for enc in enc_list:
+            dist = face_recognition.face_distance([enc], face_encoding)[0]
 
-    face_locations = face_recognition.face_locations(rgb)
-    face_encodings = face_recognition.face_encodings(rgb, face_locations)
+            if dist < min_distance:
+                min_distance = dist
+                best_match = person
 
-    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+    if best_match and min_distance < THRESHOLD:
+        return {
+            "status": "VERIFIED",
+            "name": best_match["name"],
+            "confidence": round((1 - min_distance) * 100, 2),
+            "distance": min_distance
+        }
+    else:
+        return {
+            "status": "NOT VERIFIED"
+        }
 
-        # -------- FACE MATCH --------
-        matches = face_recognition.compare_faces(known_encodings, face_encoding)
-        name = "Unknown"
+# ------------------ CONTINUOUS LEARNING ------------------
+def update_user_encoding(name, new_encoding):
+    for person in database:
+        if person["name"] == name:
 
-        if True in matches:
-            name = known_names[matches.index(True)]
+            # Ensure encodings list exists
+            if "encodings" not in person:
+                person["encodings"] = [person.get("encoding")]
+                person.pop("encoding", None)
 
-        # Draw box
-        cv2.rectangle(frame, (left, top), (right, bottom), (0,255,0), 2)
-        cv2.putText(frame, name, (left, top-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+            # Avoid duplicates
+            distances = face_recognition.face_distance(
+                person["encodings"], new_encoding
+            )
 
-        # -------- HEAD MOVEMENT (Liveness) --------
-        center_x = (left + right) // 2
-        head_positions.append(center_x)
+            if len(distances) == 0 or min(distances) > 0.3:
+                person["encodings"].append(new_encoding)
 
-        if len(head_positions) > 10:
-            head_positions.pop(0)
+            # Limit size
+            if len(person["encodings"]) > MAX_ENCODINGS_PER_USER:
+                person["encodings"].pop(0)
 
-        if max(head_positions) - min(head_positions) > 40:
-            cv2.putText(frame, "Head Movement Detected", (20,50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            break
 
-        # -------- BLINK DETECTION (Simplified) --------
-        # (Basic version: using eye region detection is complex → placeholder)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        eyes = cv2.CascadeClassifier(
-            cv2.data.haarcascades + 'haarcascade_eye.xml'
-        ).detectMultiScale(gray, 1.3, 5)
+    save_database()
 
-        if len(eyes) == 0:
-            blink_count += 1
-            print("Blink detected:", blink_count)
-            time.sleep(0.2)
+# ------------------ ROUTE: VERIFY FACE ------------------
+@app.route("/verify", methods=["POST"])
+def verify_face():
+    try:
+        if "image" not in request.files:
+            return jsonify({"error": "No image uploaded"}), 400
 
-        # -------- AUTHENTICATION --------
-        if blink_count >= 3 and name != "Unknown":
-            authenticated = True
+        file = request.files["image"]
 
-        if authenticated:
-            cv2.putText(frame, "ACCESS GRANTED", (20,100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 3)
-        else:
-            cv2.putText(frame, "Blink 3 times", (20,100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-    cv2.imshow("Smart Authentication", frame)
+        if frame is None:
+            return jsonify({"error": "Invalid image"}), 400
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-cv2.destroyAllWindows()
+        face_locations = face_recognition.face_locations(rgb)
+
+        if len(face_locations) == 0:
+            return jsonify({"status": "No Face Detected"})
+
+        face_encodings = face_recognition.face_encodings(rgb, face_locations)
+
+        results = []
+
+        for encoding in face_encodings:
+            result = match_face(encoding)
+            results.append(result)
+
+            # 🔥 CONTINUOUS LEARNING
+            if (
+                result["status"] == "VERIFIED"
+                and result["confidence"] > CONFIDENCE_LEARN_THRESHOLD
+            ):
+                update_user_encoding(result["name"], encoding)
+
+        return jsonify({
+            "faces_detected": len(results),
+            "results": results
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ------------------ ROUTE: ADD USER ------------------
+@app.route("/add_user", methods=["POST"])
+def add_user():
+    try:
+        if "image" not in request.files or "name" not in request.form:
+            return jsonify({"error": "Missing image or name"}), 400
+
+        name = request.form["name"]
+        file = request.files["image"]
+
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return jsonify({"error": "Invalid image"}), 400
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        encodings = face_recognition.face_encodings(rgb)
+
+        if len(encodings) == 0:
+            return jsonify({"error": "No face found"}), 400
+
+        new_person = {
+            "user_id": name,
+            "name": name,
+            "encodings": [encodings[0]]  # 🔥 multi-encoding structure
+        }
+
+        database.append(new_person)
+        save_database()
+
+        return jsonify({
+            "message": f"{name} added successfully"
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ------------------ ROUTE: HEALTH CHECK ------------------
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "message": "Face Recognition API is running 🚀",
+        "users_in_db": len(database)
+    })
+
+
+# ------------------ RUN SERVER ------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
