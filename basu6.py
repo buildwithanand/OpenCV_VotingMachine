@@ -1,224 +1,119 @@
 from flask import Flask, request, jsonify
-import cv2
 import numpy as np
-import os
 import pickle
+import cv2
+import os
+from deepface import DeepFace
 
 app = Flask(__name__)
 
-# ------------------ CONFIG ------------------
-DATASET_PATH = "dataset"
-MODEL_FILE = "face_model.xml"
+DB_FILE = "face_db.pkl"
+THRESHOLD = 0.6  # lower = stricter
 
-os.makedirs(DATASET_PATH, exist_ok=True)
+# ------------------ LOAD DB ------------------
+def load_db():
+    if not os.path.exists(DB_FILE):
+        return {}
+    with open(DB_FILE, "rb") as f:
+        return pickle.load(f)
 
-# ------------------ FACE DETECTORS ------------------
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
+# ------------------ SAVE DB ------------------
+def save_db(db):
+    with open(DB_FILE, "wb") as f:
+        pickle.dump(db, f)
 
-eye_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_eye.xml"
-)
+database = load_db()
 
-# ------------------ LOAD MODEL ------------------
-def load_model():
-    model = cv2.face.LBPHFaceRecognizer_create()
-    if os.path.exists(MODEL_FILE):
-        model.read(MODEL_FILE)
-    return model
+# ------------------ GET EMBEDDING ------------------
+def get_embedding(img):
+    try:
+        embedding = DeepFace.represent(
+            img_path=img,
+            model_name="Facenet",
+            enforce_detection=False
+        )[0]["embedding"]
+        return np.array(embedding)
+    except Exception as e:
+        print("Embedding error:", e)
+        return None
 
-model = load_model()
-
-# ------------------ LOAD LABELS ------------------
-def load_labels():
-    if os.path.exists("labels.pkl"):
-        with open("labels.pkl", "rb") as f:
-            return pickle.load(f)
-    return {}
-
-# ------------------ BLUR CHECK ------------------
-def is_blurry(image):
-    return cv2.Laplacian(image, cv2.CV_64F).var() < 100
-
-# ------------------ FACE ALIGNMENT ------------------
-def align_face(gray, face):
-    x, y, w, h = face
-    roi = gray[y:y+h, x:x+w]
-
-    eyes = eye_cascade.detectMultiScale(roi)
-
-    if len(eyes) >= 2:
-        eyes = sorted(eyes, key=lambda x: x[0])
-        eye1 = eyes[0]
-        eye2 = eyes[1]
-
-        ex1, ey1, ew1, eh1 = eye1
-        ex2, ey2, ew2, eh2 = eye2
-
-        center1 = (ex1 + ew1//2, ey1 + eh1//2)
-        center2 = (ex2 + ew2//2, ey2 + eh2//2)
-
-        dx = center2[0] - center1[0]
-        dy = center2[1] - center1[1]
-
-        angle = np.degrees(np.arctan2(dy, dx))
-
-        center = (w//2, h//2)
-        M = cv2.getRotationMatrix2D(center, angle, 1)
-
-        aligned = cv2.warpAffine(roi, M, (w, h))
-        return aligned
-
-    return roi
-
-# ------------------ TRAIN MODEL ------------------
-def train_model():
-    global model
-
-    faces = []
-    labels = []
-    label_map = load_labels()
-
-    current_label = 0 if not label_map else max(label_map.keys()) + 1
-
-    for person_name in os.listdir(DATASET_PATH):
-        person_path = os.path.join(DATASET_PATH, person_name)
-
-        if not os.path.isdir(person_path):
-            continue
-
-        # reuse existing label if present
-        existing_label = None
-        for k, v in label_map.items():
-            if v == person_name:
-                existing_label = k
-                break
-
-        if existing_label is None:
-            label = current_label
-            label_map[label] = person_name
-            current_label += 1
-        else:
-            label = existing_label
-
-        for img_name in os.listdir(person_path):
-            img_path = os.path.join(person_path, img_name)
-
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                continue
-
-            faces.append(img)
-            labels.append(label)
-
-    if len(faces) > 0:
-        model = cv2.face.LBPHFaceRecognizer_create()
-        model.train(faces, np.array(labels))
-        model.save(MODEL_FILE)
-
-        with open("labels.pkl", "wb") as f:
-            pickle.dump(label_map, f)
+# ------------------ COSINE SIMILARITY ------------------
+def cosine_distance(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # ------------------ ADD USER ------------------
 @app.route("/add_user", methods=["POST"])
 def add_user():
-    try:
-        name = request.form["name"]
-        file = request.files["image"]
+    name = request.form.get("name")
 
-        person_path = os.path.join(DATASET_PATH, name)
-        os.makedirs(person_path, exist_ok=True)
+    if "image" not in request.files or not name:
+        return jsonify({"error": "Missing name or image"}), 400
 
-        file_bytes = np.frombuffer(file.read(), np.uint8)
-        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    file = request.files["image"]
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
+    embedding = get_embedding(img)
 
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    if embedding is None:
+        return jsonify({"error": "Face not detected"}), 400
 
-        if len(faces) != 1:
-            return jsonify({"error": "Exactly one face required"})
+    if name in database:
+        database[name].append(embedding)
+    else:
+        database[name] = [embedding]
 
-        (x, y, w, h) = faces[0]
+    save_db(database)
 
-        face = align_face(gray, (x, y, w, h))
-        face = cv2.resize(face, (200, 200))
-
-        if is_blurry(face):
-            return jsonify({"error": "Image too blurry"})
-
-        base_path = f"{person_path}/{len(os.listdir(person_path))}"
-
-        # Data augmentation
-        cv2.imwrite(base_path + "_orig.jpg", face)
-        cv2.imwrite(base_path + "_flip.jpg", cv2.flip(face, 1))
-        cv2.imwrite(base_path + "_bright.jpg",
-                    cv2.convertScaleAbs(face, alpha=1.2, beta=20))
-        cv2.imwrite(base_path + "_dark.jpg",
-                    cv2.convertScaleAbs(face, alpha=0.8, beta=-20))
-
-        train_model()
-
-        return jsonify({"message": f"{name} added & trained successfully"})
-
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    return jsonify({"message": f"{name} added successfully"})
 
 # ------------------ VERIFY ------------------
 @app.route("/verify", methods=["POST"])
 def verify():
-    try:
-        labels = load_labels()
+    if "image" not in request.files:
+        return jsonify({"error": "No image"}), 400
 
-        if len(labels) == 0:
-            return jsonify({"error": "Model not trained yet"})
+    file = request.files["image"]
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        file = request.files["image"]
-        file_bytes = np.frombuffer(file.read(), np.uint8)
-        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    embedding = get_embedding(img)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
+    if embedding is None:
+        return jsonify({"status": "No face detected"})
 
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    best_match = None
+    best_score = -1
 
-        results = []
+    for name, embeddings in database.items():
+        for db_emb in embeddings:
+            score = cosine_distance(embedding, db_emb)
 
-        for (x, y, w, h) in faces:
-            face = align_face(gray, (x, y, w, h))
-            face = cv2.resize(face, (200, 200))
+            if score > best_score:
+                best_score = score
+                best_match = name
 
-            if is_blurry(face):
-                results.append({"status": "BLURRY IMAGE"})
-                continue
+    print("Best Score:", best_score)
 
-            label, confidence = model.predict(face)
-
-            if confidence < 65:
-                name = labels.get(label, "Unknown")
-                results.append({
-                    "status": "VERIFIED",
-                    "name": name,
-                    "confidence": round(100 - confidence, 2)
-                })
-            else:
-                results.append({"status": "NOT VERIFIED"})
-
+    if best_score > THRESHOLD:
         return jsonify({
-            "faces_detected": len(results),
-            "results": results
+            "status": "VERIFIED",
+            "name": best_match,
+            "confidence": round(best_score * 100, 2)
         })
-
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    else:
+        return jsonify({
+            "status": "UNKNOWN",
+            "confidence": round(best_score * 100, 2)
+        })
 
 # ------------------ HOME ------------------
 @app.route("/")
 def home():
-    return jsonify({"message": "Enhanced Face AI running 🚀"})
+    return jsonify({
+        "message": "Advanced Face Recognition Running 🚀",
+        "users": len(database)
+    })
 
-# ------------------ RUN ------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True)
