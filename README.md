@@ -77,7 +77,7 @@ The Raspberry Pi acts as the central controller, while the ESP32 collects physio
 
 ## Project Structure
 
-
+```text
 
 Multi-Modal-Biometric-System/
 │
@@ -131,7 +131,7 @@ Multi-Modal-Biometric-System/
   Motion Pixel Count
      ↓
   Motion Detected
-
+```
 ## System Workflow
 
                      START
