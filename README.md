@@ -116,7 +116,7 @@ Multi-Modal-Biometric-System/
     └── .gitkeep
 
 ```
-##Motion Detection Pipeline
+Motion Detection Pipeline
 ```text  
   Camera
      ↓
