@@ -115,9 +115,9 @@ Multi-Modal-Biometric-System/
 └── dataset/
     └── .gitkeep
 
-
+```
 ##Motion Detection Pipeline
-  
+```text  
   Camera
      ↓
   Frame Difference
