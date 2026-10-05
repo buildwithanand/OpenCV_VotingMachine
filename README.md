@@ -48,7 +48,7 @@ The Raspberry Pi acts as the central controller, while the ESP32 collects physio
 ---
 
 ##  System Architecture
-'
+```text
                     ┌──────────────────────┐
                     │   System Controller  │
                     │ system_controller.py │
