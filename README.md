@@ -73,7 +73,7 @@ The Raspberry Pi acts as the central controller, while the ESP32 collects physio
                               ▼
                     Raspberry Pi GPIO
 
----
+```
 
 ## Project Structure
 
@@ -179,5 +179,5 @@ Multi-Modal-Biometric-System/
                                 REPEAT
 
 
-'
+
 
