@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 
 import time
@@ -20,36 +21,36 @@ PINS = {
 }
 
 OUTPUT_WINDOW = 2.0
-MINIMUM_PULSE = 0.055
-SENSOR_TIMEOUT = 10
+SENSOR_TIMEOUT = 10.0
 
+
+# ============================================================
+# GPIO INITIALIZATION
+# ============================================================
 
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
 
 for pin in PINS.values():
-
-    GPIO.setup(pin, GPIO.OUT)
-    GPIO.output(pin, GPIO.LOW)
+    GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
 
 
 # ============================================================
-# GPIO RESET
+# RESET OUTPUTS
 # ============================================================
 
-def reset_all_outputs():
-
+def reset_outputs():
     for pin in PINS.values():
         GPIO.output(pin, GPIO.LOW)
 
 
 # ============================================================
-# SYNCHRONIZED GPIO OUTPUTS
+# SYNCHRONIZED OUTPUTS
 # ============================================================
 
 def trigger_all_outputs(face_ok, finger_ok, sensor_flags):
 
-    print("\n[SYSTEM] Triggering synchronized outputs.")
+    print("\n[SYSTEM] Updating all GPIO outputs.")
 
     pin_states = {
         PINS["face"]: bool(face_ok),
@@ -67,76 +68,28 @@ def trigger_all_outputs(face_ok, finger_ok, sensor_flags):
         f"SpO2={sensor_flags['spo2']}"
     )
 
-    start_time = time.monotonic()
+    start = time.monotonic()
 
     try:
-
-        # Apply each output state in sequence.
-        # All GPIO writes occur within a very short interval,
-        # rather than using separate delays for each signal.
+        # Update all outputs consecutively, without delays
+        # between individual GPIO writes.
         for pin, state in pin_states.items():
-
             GPIO.output(
                 pin,
                 GPIO.HIGH if state else GPIO.LOW
             )
 
-        # Maintain the original output window.
-        # The 2-second window exceeds the required 55 ms pulse.
-        elapsed = time.monotonic() - start_time
+        # Maintain the existing two-second output window.
+        remaining = OUTPUT_WINDOW - (time.monotonic() - start)
 
-        remaining = max(
-            MINIMUM_PULSE,
-            OUTPUT_WINDOW - elapsed
-        )
-
-        time.sleep(remaining)
+        if remaining > 0:
+            time.sleep(remaining)
 
     finally:
+        reset_outputs()
 
-        reset_all_outputs()
-
-    print("[SYSTEM] All outputs reset.")
-
-
-# ============================================================
-# DISPLAY CURRENT VERIFICATION RESULTS
-# ============================================================
-
-def display_results(fingerprint, face_ok, sensor_data):
-
-    print("\n" + "=" * 50)
-    print("       BIOMETRIC VERIFICATION RESULTS")
-    print("=" * 50)
-
-    print(
-        "Fingerprint:",
-        "VERIFIED" if fingerprint["verified"]
-        else "NOT VERIFIED"
-    )
-
-    if fingerprint["user_id"] is not None:
-        print("User ID:", fingerprint["user_id"])
-
-    print(
-        "Face:",
-        "VERIFIED" if face_ok
-        else "NOT VERIFIED"
-    )
-
-    if sensor_data is None:
-
-        print("Sensors: NO FRESH DATA RECEIVED")
-
-    else:
-
-        print("BPM:", sensor_data["bpm"])
-        print("Temperature:", sensor_data["temperature"], "°C")
-        print("SpO2:", sensor_data["spo2"], "%")
-
-        print("Sensor output flags:", sensor_data["flags"])
-
-    print("=" * 50)
+    print("[SYSTEM] All GPIO outputs LOW.")
+    print("[SYSTEM] Ready for the next fingerprint.")
 
 
 # ============================================================
@@ -145,38 +98,47 @@ def display_results(fingerprint, face_ok, sensor_data):
 
 def main_loop():
 
-    print("\n[SYSTEM] MAIN LOOP STARTED.")
+    print("\n[SYSTEM] Fingerprint-triggered authentication started.")
 
     while True:
 
         try:
-
             # ------------------------------------------------
             # STEP 1: WAIT FOR FINGERPRINT EVENT
             # ------------------------------------------------
 
-            print("\n[SYSTEM] Waiting for fingerprint verification...")
+            print("\n[SYSTEM] Waiting for a finger...")
 
             fingerprint = Sensors.wait_for_fingerprint()
 
             if fingerprint is None:
                 continue
 
+            finger_ok = fingerprint["verified"]
+
             print(
-                "[SYSTEM] Fingerprint event received:",
-                fingerprint["verified"]
+                f"[SYSTEM] Fingerprint result: "
+                f"{'MATCH' if finger_ok else 'NO MATCH'}"
             )
 
+            # Do not proceed to face verification if the
+            # fingerprint did not match.
+            if not finger_ok:
+                print("[SYSTEM] Fingerprint rejected.")
+                print("[SYSTEM] Waiting for the next attempt.")
+                continue
+
             # ------------------------------------------------
-            # STEP 2: RUN FACE VERIFICATION
+            # STEP 2: FACE CAPTURE / SIMULATION
             # ------------------------------------------------
 
-            print("[SYSTEM] Running face verification...")
+            print("[SYSTEM] Fingerprint accepted.")
+            print("[SYSTEM] Starting face verification.")
 
             face_ok = FaceSim2.run_once()
 
             # ------------------------------------------------
-            # STEP 3: WAIT FOR FRESH SENSOR DATA
+            # STEP 3: GET FRESH SENSOR DATA
             # ------------------------------------------------
 
             print("[SYSTEM] Waiting for fresh sensor readings...")
@@ -185,10 +147,6 @@ def main_loop():
                 after_timestamp=fingerprint["timestamp"],
                 timeout=SENSOR_TIMEOUT
             )
-
-            # ------------------------------------------------
-            # STEP 4: DETERMINE SENSOR OUTPUT FLAGS
-            # ------------------------------------------------
 
             if sensor_data is None:
 
@@ -204,43 +162,53 @@ def main_loop():
 
                 sensor_flags = sensor_data["flags"]
 
+                print(
+                    f"[SENSORS] BPM={sensor_data['bpm']}, "
+                    f"Temperature={sensor_data['temperature']} °C, "
+                    f"SpO2={sensor_data['spo2']}%"
+                )
+
             # ------------------------------------------------
-            # STEP 5: DISPLAY RESULTS
+            # STEP 4: DISPLAY RESULTS
             # ------------------------------------------------
 
-            display_results(
-                fingerprint,
-                face_ok,
-                sensor_data
+            print("\n========== VERIFICATION SUMMARY ==========")
+
+            print(
+                "Fingerprint:",
+                "VERIFIED" if finger_ok else "FAILED"
             )
 
+            print(
+                "Face:",
+                "VERIFIED" if face_ok else "FAILED"
+            )
+
+            if sensor_data is not None:
+                print("Sensor flags:", sensor_flags)
+            else:
+                print("Sensors: NO FRESH DATA")
+
+            print("==========================================")
+
             # ------------------------------------------------
-            # STEP 6: SYNCHRONIZED GPIO OUTPUTS
+            # STEP 5: UPDATE ALL OUTPUTS TOGETHER
             # ------------------------------------------------
 
             trigger_all_outputs(
                 face_ok=face_ok,
-                finger_ok=fingerprint["verified"],
+                finger_ok=finger_ok,
                 sensor_flags=sensor_flags
             )
 
-            # ------------------------------------------------
-            # STEP 7: RETURN TO IDLE
-            # ------------------------------------------------
-
-            print("[SYSTEM] Returning to idle.")
-
         except KeyboardInterrupt:
-
             print("\n[SYSTEM] Shutdown requested.")
             break
 
         except Exception as error:
-
             print(f"[ERROR] Authentication cycle failed: {error}")
 
-            reset_all_outputs()
-
+            reset_outputs()
             time.sleep(1)
 
 
@@ -251,28 +219,24 @@ def main_loop():
 if __name__ == "__main__":
 
     try:
-
-        print("========================================")
+        print("==========================================")
         print(" DLD BIOMETRIC AUTHENTICATION SYSTEM")
-        print(" CAMERA-FREE FACE SIMULATION ENABLED")
-        print("========================================")
+        print(" FINGERPRINT-TRIGGERED FACE SIMULATION")
+        print("==========================================")
 
-        # Start exactly one ESP32 serial listener.
+        # Start the single ESP32 serial listener.
         Sensors.start_listener()
 
-        # Start the authentication controller.
+        # Start the authentication sequence.
         main_loop()
 
     except KeyboardInterrupt:
-
         print("\n[SYSTEM] Stopping system.")
 
     finally:
-
-        reset_all_outputs()
-
+        reset_outputs()
         Sensors.stop_listener()
-
         GPIO.cleanup()
 
         print("[SYSTEM] GPIO cleanup complete.")
+```
